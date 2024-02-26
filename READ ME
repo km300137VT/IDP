@@ -1,0 +1,3 @@
+Project for integrated design project class.
+This is a code for a sensor used to send data when a while fire is detected.
+Used DC/DC converter and Arduino MCU, Bluetooth sensor and a temperature node.
