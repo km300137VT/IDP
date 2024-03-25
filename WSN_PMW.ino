@@ -12,7 +12,7 @@ double dutyCycle = 0.61;
 #define nominal_resistance 10000       //Nominal resistance at 25⁰C
 #define nominal_temeprature 25   // temperature for nominal resistance (almost always 25⁰ C)
 #define samplingrate 5    // Number of samples
-#define beta 3428  // The beta coefficient or the B value of the thermistor (usually 3000-4000) check the datasheet for the accurate value.
+#define beta 3989 // The beta coefficient or the B value of the thermistor (usually 3000-4000) check the datasheet for the accurate value.
 #define Rref 10000   //Value of  resistor used for the voltage divider
 int samples = 0;   //array to store the samples
 
@@ -81,10 +81,10 @@ void loop() {
   Serial.println(average);
 
   // Calculate NTC resistance
-  average = 1023 / average - 1;
-  average = Rref / average;
-  Serial.print("Thermistor resistance ");
-  Serial.println(average);
+  average = samples / samplingrate;
+average = Rref * (1023.0 / average - 1.0);
+Serial.print("Thermistor resistance ");
+Serial.println(average);
   float temperature;
   temperature = average / nominal_resistance;     // (R/Ro)
   temperature = log(temperature);                  // ln(R/Ro)
