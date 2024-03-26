@@ -1,26 +1,37 @@
-﻿#define PWM_PIN 9
-#define SUPPLY_VOLTAGE_PIN A0
+#define PWM_PIN 9
+#define SUPPLY_VOLTAGE_PIN A1
+#define OUTPUT_VOLTAGE_PIN A0
 
 #define CLOCK_FREQUENCY 16000000
 #define PWM_FREQUENCY 50000
 
-//PMW signal global variables
-double dutyCycle = 0.61;
-double voltageTarget = 10;  //Initial, state machine implementation later
+#define OUTPUT_VOLTAGE_DIVIDER_SCALE (330000 + 680000) / (330000)
+#define OUTPUT_VOLTAGE_ACCEPTABLE_ERROR 0.05
+#define PWM_KP 0.0005
 
-//Thermitsor global variables
-#define ntc_pin A0         // Pin, to which the voltage divider is connected
-#define vd_power_pin 2        // 5V for the voltage divider
-#define nominal_resistance 10000       //Nominal resistance at 25⁰C
-#define nominal_temeprature 25   // temperature for nominal resistance (almost always 25⁰ C)
-#define samplingrate 5    // Number of samples
-#define beta 3989 // The beta coefficient or the B value of the thermistor (usually 3000-4000) check the datasheet for the accurate value.
-#define Rref 10000   //Value of  resistor used for the voltage divider
-int samples = 0;   //array to store the samples
+//PMW signal global variables
+double dutyCycle;
+double voltageTarget = 10;  //Initial, state machine implementation later
+const int numOutputVoltageSamples = 25;
+double voltageOutputSamples[numOutputVoltageSamples];
+
+//Thermistor global variables
+#define ntc_pin A0                // Pin, to which the voltage divider is connected
+#define vd_power_pin 2            // 5V for the voltage divider
+#define nominal_resistance 10000  // Nominal resistance at 25⁰C
+#define nominal_temeprature 25    // temperature for nominal resistance (almost always 25⁰ C)
+#define samplingrate 5            // Number of samples
+#define beta 3989                 // The beta coefficient or the B value of the thermistor (usually 3000-4000) check the datasheet for the accurate value.
+#define Rref 10000                // Value of  resistor used for the voltage divider
+int samples = 0;                  // array to store the samples
 
 void setup() {
   pinMode(SUPPLY_VOLTAGE_PIN, INPUT);
+  pinMode(OUTPUT_VOLTAGE_PIN, INPUT);
   pinMode(PWM_PIN, OUTPUT);
+
+  //Do preliminary duty cycle setting, will be close loop incremented towards more accurately during runtime
+  dutyCycle = -analogRead(SUPPLY_VOLTAGE_PIN)/voltageTarget + 1;
 
   //COM1A1 selects output comparison mode
   TCCR1A = _BV(COM1A1) | _BV(WGM11); 
@@ -48,20 +59,44 @@ void setup() {
   and the duty cycle can be calculated by OCR1A / ICR1 (threshold divided by top value)
   */
 
+  //Initialize voltage sample array
+  for (int i = 0; i < numOutputVoltageSamples; i++) voltageOutputSamples[i] = 0;
+
   ///THERMISTOR CODE
   pinMode(vd_power_pin, OUTPUT);
   Serial.begin(9600);  // initialize serial communication at a baud rate of 9600
 }
 
-int counter = 0;
-int increment = 1;
-void loop() {
-  dutyCycle = counter / 100.0f;
-  OCR1A = ICR1 * dutyCycle;
-  if (counter == 70) increment = -1;
-  if (counter == 50) increment = 1;
-  counter += increment;
+// int counter = 0;
+// int increment = 1;
 
+void loop() {
+  //Tech Demo cycle code
+  // dutyCycle = counter / 100.0f;
+  // OCR1A = ICR1 * dutyCycle;
+  // if (counter == 70) increment = -1;
+  // if (counter == 50) increment = 1;
+  // counter += increment;
+  int voltageSampleSum = 0;
+  bool voltageReadingsInitialized = true;
+  for (int j = numOutputVoltageSamples - 1; j > 0; j--) {
+    voltageOutputSamples[j] = voltageOutputSamples[j-1];                    //Shift all voltage readings one index right, deleting oldest value
+    if (voltageOutputSamples[j] == 0) voltageReadingsInitialized = false;   //Zero check, don't update duty cycle if average is dragged down by zeros
+    voltageSampleSum += voltageOutputSamples[j];
+  }
+  voltageOutputSamples[0] = analogRead(OUTPUT_VOLTAGE_PIN);
+  voltageSampleSum += voltageOutputSamples[0];
+  Serial.print("Current Voltage Sample Sum: ");
+  Serial.println(dutyCycle);
+
+  if (voltageReadingsInitialized) {   //Only start modifying stuff once the average is set, gives time for steady state response to stabilize
+    int outputVoltage = (voltageSampleSum/numOutputVoltageSamples) * OUTPUT_VOLTAGE_DIVIDER_SCALE / 1023 * 5;
+    int voltageError = outputVoltage - voltageTarget;
+    if (voltageError > OUTPUT_VOLTAGE_ACCEPTABLE_ERROR || voltageError < -OUTPUT_VOLTAGE_ACCEPTABLE_ERROR) {
+      dutyCycle += voltageError * PWM_KP;
+      OCR1A = ICR1 * dutyCycle;
+    }
+  }
   delay(25);
 
   uint8_t i;
