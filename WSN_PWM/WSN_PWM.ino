@@ -90,6 +90,14 @@ void setup() {
   and the duty cycle can be calculated by OCR1A / ICR1 (threshold divided by top value)
   */
 
+  //Now repeat the above but without the output comparison or middle value, we simply need 
+  //an interrupt flag thrown every 30 seconds when in sleep mode so we'll use Timer0
+  TCCR0A = _BV(WGM01) | _BV(WGM00);
+  TCCR0B = _BV(CS02) | _BV(CS00);
+  TIMSK0 = TOIE1;
+  OCR0A = 255;  //Maximum value for 8 bit output compare register
+
+
   //Initialize voltage sample array
   for (int i = 0; i < numOutputVoltageSamples; i++) outputVoltageSamples[i] = 0;
 
