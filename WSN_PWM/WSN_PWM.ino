@@ -3,23 +3,37 @@
 #define PWM_PIN 9
 #define SUPPLY_VOLTAGE_PIN A1
 #define OUTPUT_VOLTAGE_PIN A5
+#define BATTERY_VOLTAGE_PIN A4
 
 #define CLOCK_FREQUENCY 16000000
 #define PWM_FREQUENCY 50000
 
-#define SUPPLY_VOLTAGE_ACCEPTABLE_MINIMUM 3.0
 #define OUTPUT_VOLTAGE_DIVIDER_SCALE 3.5      //Should be *roughly* (330000 + 680000) / 330000 or whatever other voltage divider you use
 #define OUTPUT_VOLTAGE_ACCEPTABLE_ERROR 0.05
 #define PWM_KP 0.005
-
 #define MIN_DUTY_CYCLE 0
 #define MAX_DUTY_CYCLE 1
 
+#define SUPPLY_VOLTAGE_ACCEPTABLE_MINIMUM 3.0
+#define BATTERY_CHARGING_CURRENT_mA 125         //Maximum is 150
+#define BATTERY_CHARGING_RESISTOR_VALUE 10        //in Ohms
+#define BATTERY_CHARGE_VOLTAGE_THRESHOLD 10.3
+#define BATTERY_CHARGED_SUSTAIN_VOLTAGE 10.5
+
+typedef enum {
+  DISCHARGING,
+  CHARGING,
+  CHARGED  
+} BatteryState;
+BatteryState batteryState;
+
 //PMW signal global variables
-double dutyCycle=0.5;
+double dutyCycle;
 double voltageTarget = 10.0;  //Initial, state machine implementation later
 const int numOutputVoltageSamples = 5;
-double voltageOutputSamples[numOutputVoltageSamples];
+double outputVoltageSamples[numOutputVoltageSamples];
+double supplyVoltageMeasured;
+double voltageError;
 
 //Thermistor global variables
 #define ntc_pin A0                // Pin, to which the voltage divider is connected
@@ -36,20 +50,12 @@ int samples = 0;                  // array to store the samples
 SoftwareSerial HM10(10, 11);
 
 void setup() {
-  Serial.begin(9600);  // initialize serial communication at a baud rate of 9600
-
-  pinMode(SUPPLY_VOLTAGE_PIN, INPUT);
-  pinMode(OUTPUT_VOLTAGE_PIN, INPUT);
-  pinMode(PWM_PIN, OUTPUT);
-
-  //Do preliminary duty cycle setting, will be close loop incremented towards more accurately during runtime
-  // double supplyVoltage = analogRead(SUPPLY_VOLTAGE_PIN) / 1023.0f * 5.0f;
-  // if (supplyVoltage > SUPPLY_VOLTAGE_ACCEPTABLE_MINIMUM) {
-  //   dutyCycle = (voltageTarget - supplyVoltage) / voltageTarget;
-  // } else {
-  //   dutyCycle = 0;
-  //   HM10.write("SUPPLY TOO LOW, CONVERTER DISABLED");
-  // }
+  //Pin configurations
+  pinMode(SUPPLY_VOLTAGE_PIN, INPUT);   //Supply ADC, for determining charging mode
+  pinMode(BATTERY_VOLTAGE_PIN, INPUT);  //Battery ADC, used to monitor battery charging state
+  pinMode(OUTPUT_VOLTAGE_PIN, INPUT);   //Boost Output ADC, for feedback to PWM signal
+  pinMode(PWM_PIN, OUTPUT);             //PWM Pin, outputs to gate on MOSFET
+  pinMode(vd_power_pin, OUTPUT);        //Thermistor 
   
   // HM10.write("SUPPLY VOLTAGE: ");
   // HM10.write(supplyVoltage);
@@ -66,6 +72,7 @@ void setup() {
   //ICR1 stores the "top" value of the counter; when it reaches this value, it flips around and starts counting downward.
   ICR1 = (CLOCK_FREQUENCY / (2 * PWM_FREQUENCY));
 
+  dutyCycle = 0;  //Set to 0 (converter off) by default, will be incremented during the main loop
   //OCR1A Stores the counter threshold; when the timer reaches this threshold, if it's counting upward it toggles the output on, and
   //if it's counting downward and drops below it it turns the output off.
   OCR1A = ICR1 * dutyCycle;
@@ -84,66 +91,83 @@ void setup() {
   */
 
   //Initialize voltage sample array
-  for (int i = 0; i < numOutputVoltageSamples; i++) voltageOutputSamples[i] = 0;
+  for (int i = 0; i < numOutputVoltageSamples; i++) outputVoltageSamples[i] = 0;
 
-  ///THERMISTOR CODE
-  pinMode(vd_power_pin, OUTPUT);
-
-//Bluethood code 
+  //Bluetooth code 
   // Start communication with the HM10 Bluetooth module at 9600 baud
   HM10.begin(9600);
   // Start the serial communication with the computer at 9600 baud
   Serial.begin(9600);
 }
 
-// int counter = 0;
-// int increment = 1;
-
 void loop() {
-  // //Tech Demo cycle code
-  // // dutyCycle = counter / 100.0f;
-  // // OCR1A = ICR1 * dutyCycle;
-  // // if (counter == 70) increment = -1;
-  // // if (counter == 50) increment = 1;
-  // // counter += increment;
-  // double voltageSampleSum = 0;
-  // bool voltageReadingsInitialized = true;
-  // for (int j = numOutputVoltageSamples - 1; j > 0; j--) {
-  //   voltageOutputSamples[j] = voltageOutputSamples[j-1];                    //Shift all voltage readings one index right, deleting oldest value
-  //   if (voltageOutputSamples[j] == 0) voltageReadingsInitialized = false;   //Zero check, don't update duty cycle if average is dragged down by zeros
-  //   voltageSampleSum += voltageOutputSamples[j];
-  // }
-  // voltageOutputSamples[0] = analogRead(OUTPUT_VOLTAGE_PIN);
-  // voltageSampleSum += voltageOutputSamples[0];
-  // // HM10.write("Current Duty Cycle: ");
-  // // HM10.write(dutyCycle);
 
-  // if (voltageReadingsInitialized) {   //Only start modifying stuff once the average is set, gives time for steady state response to stabilize
-  //   double outputVoltage = (voltageSampleSum/numOutputVoltageSamples) * OUTPUT_VOLTAGE_DIVIDER_SCALE / 1023.0f * 5.0f;
-  //   double voltageError = voltageTarget - outputVoltage;
+  double outputVoltageSampleSum = 0;
+  bool outputVoltageReadingsInitialized = true;
+  for (int j = numOutputVoltageSamples - 1; j > 0; j--) {
+    outputVoltageSamples[j] = outputVoltageSamples[j-1];                          //Shift all voltage readings one index right, deleting oldest value
+    if (outputVoltageSamples[j] == 0) outputVoltageReadingsInitialized = false;   //Zero check, don't update duty cycle if average is dragged down by zeros
+    outputVoltageSampleSum += outputVoltageSamples[j];
+  }
+  outputVoltageSamples[0] = analogRead(OUTPUT_VOLTAGE_PIN);
+  outputVoltageSampleSum += outputVoltageSamples[0];
+  double outputVoltage = (outputVoltageSampleSum/numOutputVoltageSamples) * OUTPUT_VOLTAGE_DIVIDER_SCALE / 1023.0f * 5.0f;
+  double batteryVoltage = analogRead(BATTERY_VOLTAGE_PIN) / 1023.0f * 5.0f;
+  double supplyVoltage = analogRead(SUPPLY_VOLTAGE_PIN) / 1023.0f * 5.0f;
 
-  //   HM10.write("Current Output Voltage: ");
-  //   HM10.write(outputVoltage);
-  //   HM10.write(" | Current Voltage Error: ");
-  //   HM10.write(voltageError);
+  if (supplyVoltage < SUPPLY_VOLTAGE_ACCEPTABLE_MINIMUM) {
+    batteryState = DISCHARGING;
+  } else if(batteryVoltage > BATTERY_CHARGE_VOLTAGE_THRESHOLD) {
+    batteryState = CHARGED;
+  } else {
+    batteryState = CHARGING;
+  }
+  //Battery charge management
+  switch(batteryState) {
+  case DISCHARGING:
+    voltageTarget = 0;
+    dutyCycle = 0;
+    break;
+  case CHARGING:
+    voltageTarget = batteryVoltage + (BATTERY_CHARGING_CURRENT_mA*BATTERY_CHARGING_RESISTOR_VALUE / 1000.0f);
 
-  //   if (voltageError > OUTPUT_VOLTAGE_ACCEPTABLE_ERROR || voltageError < -OUTPUT_VOLTAGE_ACCEPTABLE_ERROR) {
-  //     if (dutyCycle + PWM_KP * voltageError > MIN_DUTY_CYCLE && dutyCycle + PWM_KP * voltageError < MAX_DUTY_CYCLE) {
-  //       dutyCycle += voltageError * PWM_KP;
-  //       OCR1A = ICR1 * dutyCycle;
+    break;
+  case CHARGED:
+    voltageTarget = BATTERY_CHARGED_SUSTAIN_VOLTAGE;
+    break;
+  }
+
+
+  if (outputVoltageReadingsInitialized) {   //Only start modifying stuff once the average is set, gives time for steady state response to stabilize
+    if (voltageTarget != 0) {
+      voltageError = voltageTarget - outputVoltage;
+    } else {
+      voltageError = 0;
+    }
+
+    HM10.write("Current Output Voltage: ");
+    HM10.write(outputVoltage);
+    HM10.write(" | Current Voltage Error: ");
+    HM10.write(voltageError);
+
+    if (voltageError > OUTPUT_VOLTAGE_ACCEPTABLE_ERROR || voltageError < -OUTPUT_VOLTAGE_ACCEPTABLE_ERROR) {
+      if (dutyCycle + PWM_KP * voltageError > MIN_DUTY_CYCLE && dutyCycle + PWM_KP * voltageError < MAX_DUTY_CYCLE) {
+        dutyCycle += voltageError * PWM_KP;
+        OCR1A = ICR1 * dutyCycle;
         
-  //       HM10.write(" | Adjusting duty cycle to: ");
-  //       HM10.write(dutyCycle);
-  //     } else {
-  //       HM10.write(" | Converter tried to adjust duty cycle but fell outside bounds.");
-  //     }
-  //   } else {
-  //     HM10.write(" | Converter output nominal.");
-  //   }
-  // }
-  // delay(25);
-  // HM10.write("");
+        HM10.write(" | Adjusting duty cycle to: ");
+        HM10.write(dutyCycle);
+      } else {
+        HM10.write(" | Converter tried to adjust duty cycle but fell outside bounds.");
+      }
+    } else {
+      HM10.write(" | Converter output nominal.");
+    }
+  }
+  delay(25);
+  HM10.write("");
 
+  //THERMISTOR READING
   uint8_t i;
   float average;
   samples = 0;
