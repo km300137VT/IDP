@@ -8,17 +8,19 @@
 #define CLOCK_FREQUENCY 16000000
 #define PWM_FREQUENCY 50000
 
-#define OUTPUT_VOLTAGE_DIVIDER_SCALE 3.5      //Should be *roughly* (330000 + 680000) / 330000 or whatever other voltage divider you use
+#define OUTPUT_VOLTAGE_DIVIDER_SCALE 3.060606060606      //Should be *roughly* (330000 + 680000) / 330000 or whatever other voltage divider you use
 #define OUTPUT_VOLTAGE_ACCEPTABLE_ERROR 0.05
 #define PWM_KP 0.005
 #define MIN_DUTY_CYCLE 0
 #define MAX_DUTY_CYCLE 1
 
+#define BATTERY_VOLTAGE_DIVIDER_SCALE 3.060606060606
 #define SUPPLY_VOLTAGE_ACCEPTABLE_MINIMUM 3.0
-#define BATTERY_CHARGING_CURRENT_mA 125         //Maximum is 150
+#define BATTERY_CHARGING_CURRENT_mA 75         //Maximum is 150
 #define BATTERY_CHARGING_RESISTOR_VALUE 10        //in Ohms
 #define BATTERY_CHARGE_VOLTAGE_THRESHOLD 10.3
 #define BATTERY_CHARGED_SUSTAIN_VOLTAGE 10.5
+#define BATTERY_CHARGING_MINIMUM_DUTY_CYCLE 0.4
 
 typedef enum {
   DISCHARGING,
@@ -120,7 +122,7 @@ void loop() {
   outputVoltageSamples[0] = analogRead(OUTPUT_VOLTAGE_PIN);
   outputVoltageSampleSum += outputVoltageSamples[0];
   double outputVoltage = (outputVoltageSampleSum/numOutputVoltageSamples) * OUTPUT_VOLTAGE_DIVIDER_SCALE / 1023.0f * 5.0f;
-  double batteryVoltage = analogRead(BATTERY_VOLTAGE_PIN) / 1023.0f * 5.0f;
+  double batteryVoltage = analogRead(BATTERY_VOLTAGE_PIN) * BATTERY_VOLTAGE_DIVIDER_SCALE / 1023.0f * 5.0f;
   double supplyVoltage = analogRead(SUPPLY_VOLTAGE_PIN) / 1023.0f * 5.0f;
 
   if (supplyVoltage < SUPPLY_VOLTAGE_ACCEPTABLE_MINIMUM) {
@@ -133,18 +135,20 @@ void loop() {
   //Battery charge management
   switch(batteryState) {
   case DISCHARGING:
+    Serial.print("State: DISCHARGING");
     voltageTarget = 0;
     dutyCycle = 0;
     break;
   case CHARGING:
+    if (dutyCycle < BATTERY_CHARGING_MINIMUM_DUTY_CYCLE) dutyCycle = BATTERY_CHARGING_MINIMUM_DUTY_CYCLE + 0.05;
     voltageTarget = batteryVoltage + (BATTERY_CHARGING_CURRENT_mA*BATTERY_CHARGING_RESISTOR_VALUE / 1000.0f);
-
+    Serial.print("State: CHARGING");
     break;
   case CHARGED:
     voltageTarget = BATTERY_CHARGED_SUSTAIN_VOLTAGE;
+    Serial.print("State: CHARGED");
     break;
   }
-
 
   if (outputVoltageReadingsInitialized) {   //Only start modifying stuff once the average is set, gives time for steady state response to stabilize
     if (voltageTarget != 0) {
@@ -153,23 +157,27 @@ void loop() {
       voltageError = 0;
     }
 
-    HM10.write("Current Output Voltage: ");
-    HM10.write(outputVoltage);
-    HM10.write(" | Current Voltage Error: ");
-    HM10.write(voltageError);
+    Serial.print(" | Battery Voltage: ");
+    Serial.print(batteryVoltage);
+    Serial.print(" | Output Voltage: ");
+    Serial.print(outputVoltage);
+    Serial.print(" | Voltage Target: ");
+    Serial.print(voltageTarget);
+    Serial.print(" | Current Voltage Error: ");
+    Serial.print(voltageError);
 
     if (voltageError > OUTPUT_VOLTAGE_ACCEPTABLE_ERROR || voltageError < -OUTPUT_VOLTAGE_ACCEPTABLE_ERROR) {
       if (dutyCycle + PWM_KP * voltageError > MIN_DUTY_CYCLE && dutyCycle + PWM_KP * voltageError < MAX_DUTY_CYCLE) {
         dutyCycle += voltageError * PWM_KP;
         OCR1A = ICR1 * dutyCycle;
         
-        HM10.write(" | Adjusting duty cycle to: ");
-        HM10.write(dutyCycle);
+        Serial.print(" | Adjusting duty cycle to: ");
+        Serial.println(dutyCycle);
       } else {
-        HM10.write(" | Converter tried to adjust duty cycle but fell outside bounds.");
+        Serial.println(" | Converter tried to adjust duty cycle but fell outside bounds.");
       }
     } else {
-      HM10.write(" | Converter output nominal.");
+      Serial.println(" | Converter output nominal.");
     }
   }
   delay(25);
