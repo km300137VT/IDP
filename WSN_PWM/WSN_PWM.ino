@@ -8,7 +8,7 @@
 #define CLOCK_FREQUENCY 16000000
 #define PWM_FREQUENCY 50000
 
-#define SLEEP_CYCLE_COUNT_UPDATE_THRESH 4  //WDT throws a flag every 2 seconds; 15 cycles means 30 seconds of sleep mode before updating and state checking
+#define SLEEP_CYCLE_COUNT_UPDATE_THRESH 15  //WDT throws a flag every 2 seconds; 15 cycles means 30 seconds of sleep mode before updating and state checking
 
 #define OUTPUT_VOLTAGE_DIVIDER_SCALE 2.7      //Should be *roughly* (330000 + 680000) / 330000 or whatever other voltage divider you use
 #define OUTPUT_VOLTAGE_ACCEPTABLE_ERROR 0.05
@@ -214,7 +214,8 @@ void loop() {
     Serial.println("State: DISCHARGING");
     break;
   case CHARGING:
-    
+    voltageTarget = batteryVoltage + (BATTERY_CHARGING_CURRENT_mA*BATTERY_CHARGING_RESISTOR_VALUE / 1000.0f);
+
     if(batteryVoltage > BATTERY_CHARGE_VOLTAGE_THRESHOLD) {
       batteryState = CHARGED;
       voltageTarget = BATTERY_CHARGED_SUSTAIN_VOLTAGE;
