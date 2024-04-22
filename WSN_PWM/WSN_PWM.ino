@@ -8,15 +8,17 @@
 #define CLOCK_FREQUENCY 16000000
 #define PWM_FREQUENCY 50000
 
-#define OUTPUT_VOLTAGE_DIVIDER_SCALE 3.060606060606      //Should be *roughly* (330000 + 680000) / 330000 or whatever other voltage divider you use
+#define SLEEP_CYCLE_COUNT_UPDATE_THRESH 2  //WDT throws a flag every 2 seconds; 15 cycles means 30 seconds of sleep mode before updating and state checking
+
+#define OUTPUT_VOLTAGE_DIVIDER_SCALE 2.8      //Should be *roughly* (330000 + 680000) / 330000 or whatever other voltage divider you use
 #define OUTPUT_VOLTAGE_ACCEPTABLE_ERROR 0.05
 #define PWM_KP 0.005
 #define MIN_DUTY_CYCLE 0
 #define MAX_DUTY_CYCLE 1
 
-#define BATTERY_VOLTAGE_DIVIDER_SCALE 3.060606060606
+#define BATTERY_VOLTAGE_DIVIDER_SCALE 2.8
 #define SUPPLY_VOLTAGE_ACCEPTABLE_MINIMUM 3.0
-#define BATTERY_CHARGING_CURRENT_mA 75         //Maximum is 150
+#define BATTERY_CHARGING_CURRENT_mA 100         //Maximum is 150
 #define BATTERY_CHARGING_RESISTOR_VALUE 10        //in Ohms
 #define BATTERY_CHARGE_VOLTAGE_THRESHOLD 10.3
 #define BATTERY_CHARGED_SUSTAIN_VOLTAGE 10.5
@@ -36,6 +38,15 @@ const int numOutputVoltageSamples = 5;
 double outputVoltageSamples[numOutputVoltageSamples];
 double supplyVoltageMeasured;
 double voltageError;
+bool outputVoltageReadingsInitialized = false;;
+
+int sleepCycleCount = 0;
+
+double outputVoltage;
+double supplyVoltage;
+double batteryVoltage;
+
+#define boostEnabled (batteryState == CHARGING || batteryState == CHARGED)
 
 //Thermistor global variables
 #define ntc_pin A0                // Pin, to which the voltage divider is connected
@@ -58,6 +69,7 @@ void setup() {
   pinMode(OUTPUT_VOLTAGE_PIN, INPUT);   //Boost Output ADC, for feedback to PWM signal
   pinMode(PWM_PIN, OUTPUT);             //PWM Pin, outputs to gate on MOSFET
   pinMode(vd_power_pin, OUTPUT);        //Thermistor 
+  pinMode(LED_BUILTIN, OUTPUT);         //For debugging
   
   // HM10.write("SUPPLY VOLTAGE: ");
   // HM10.write(supplyVoltage);
@@ -92,14 +104,6 @@ void setup() {
   and the duty cycle can be calculated by OCR1A / ICR1 (threshold divided by top value)
   */
 
-  //Now repeat the above but without the output comparison or middle value, we simply need 
-  //an interrupt flag thrown every 30 seconds when in sleep mode so we'll use Timer0
-  TCCR0A = _BV(WGM01) | _BV(WGM00);
-  TCCR0B = _BV(CS02) | _BV(CS00);
-  TIMSK0 = TOIE1;
-  OCR0A = 255;  //Maximum value for 8 bit output compare register
-
-
   //Initialize voltage sample array
   for (int i = 0; i < numOutputVoltageSamples; i++) outputVoltageSamples[i] = 0;
 
@@ -108,49 +112,30 @@ void setup() {
   HM10.begin(9600);
   // Start the serial communication with the computer at 9600 baud
   Serial.begin(9600);
+  while(!Serial);
+  Serial.println("Beginning WSN System...");
+
+  //Power-down sleep mode configuration
+  SMCR |= _BV(SM1);
+
+  //Initial state configuration
+  updateBatterySystemVoltages();
+  if (supplyVoltage > SUPPLY_VOLTAGE_ACCEPTABLE_MINIMUM) {
+    batteryState = CHARGING;
+    voltageTarget = batteryVoltage + (BATTERY_CHARGING_CURRENT_mA*BATTERY_CHARGING_RESISTOR_VALUE / 1000.0f);
+    dutyCycle = 1.0f - supplyVoltage/voltageTarget;
+  } else {
+    batteryState = DISCHARGING;
+  }
 }
 
 void loop() {
 
-  double outputVoltageSampleSum = 0;
-  bool outputVoltageReadingsInitialized = true;
-  for (int j = numOutputVoltageSamples - 1; j > 0; j--) {
-    outputVoltageSamples[j] = outputVoltageSamples[j-1];                          //Shift all voltage readings one index right, deleting oldest value
-    if (outputVoltageSamples[j] == 0) outputVoltageReadingsInitialized = false;   //Zero check, don't update duty cycle if average is dragged down by zeros
-    outputVoltageSampleSum += outputVoltageSamples[j];
-  }
-  outputVoltageSamples[0] = analogRead(OUTPUT_VOLTAGE_PIN);
-  outputVoltageSampleSum += outputVoltageSamples[0];
-  double outputVoltage = (outputVoltageSampleSum/numOutputVoltageSamples) * OUTPUT_VOLTAGE_DIVIDER_SCALE / 1023.0f * 5.0f;
-  double batteryVoltage = analogRead(BATTERY_VOLTAGE_PIN) * BATTERY_VOLTAGE_DIVIDER_SCALE / 1023.0f * 5.0f;
-  double supplyVoltage = analogRead(SUPPLY_VOLTAGE_PIN) / 1023.0f * 5.0f;
+  //Read all circuit voltages if charging circuit enabled; if not, special case handled in switch statement below
+  if (boostEnabled) updateBatterySystemVoltages();
 
-  if (supplyVoltage < SUPPLY_VOLTAGE_ACCEPTABLE_MINIMUM) {
-    batteryState = DISCHARGING;
-  } else if(batteryVoltage > BATTERY_CHARGE_VOLTAGE_THRESHOLD) {
-    batteryState = CHARGED;
-  } else {
-    batteryState = CHARGING;
-  }
-  //Battery charge management
-  switch(batteryState) {
-  case DISCHARGING:
-    Serial.print("State: DISCHARGING");
-    voltageTarget = 0;
-    dutyCycle = 0;
-    break;
-  case CHARGING:
-    if (dutyCycle < BATTERY_CHARGING_MINIMUM_DUTY_CYCLE) dutyCycle = BATTERY_CHARGING_MINIMUM_DUTY_CYCLE + 0.05;
-    voltageTarget = batteryVoltage + (BATTERY_CHARGING_CURRENT_mA*BATTERY_CHARGING_RESISTOR_VALUE / 1000.0f);
-    Serial.print("State: CHARGING");
-    break;
-  case CHARGED:
-    voltageTarget = BATTERY_CHARGED_SUSTAIN_VOLTAGE;
-    Serial.print("State: CHARGED");
-    break;
-  }
-
-  if (outputVoltageReadingsInitialized) {   //Only start modifying stuff once the average is set, gives time for steady state response to stabilize
+  //Boost converter calculation based on battery state
+  if (boostEnabled && outputVoltageReadingsInitialized) {   //Only start modifying stuff once the average is set, gives time for steady state response to stabilize
     if (voltageTarget != 0) {
       voltageError = voltageTarget - outputVoltage;
     } else {
@@ -180,9 +165,108 @@ void loop() {
       Serial.println(" | Converter output nominal.");
     }
   }
-  delay(25);
-  HM10.write("");
 
+  switch(batteryState) {
+  case DISCHARGING:
+    Serial.println("Procing sleep mode");
+
+    //Sleep mode handling
+    // ADCSRA &= ~_BV(ADEN);  //Disable ADC
+    // PRR &= ~_BV(PRADC);    //Power-down the ADC
+    SMCR |= _BV(SE);       //Enter sleep mode
+    asm volatile("SLEEP"); //Sleep Instruction
+    SMCR &= ~_BV(SE);      //Exit sleep mode
+    //End of sleep mode handling
+
+    sleepCycleCount++;
+    if(sleepCycleCount == SLEEP_CYCLE_COUNT_UPDATE_THRESH) {
+      // PRR |= _BV(PRADC);     //Power-up the ADC
+      // ADCSRA |= _BV(ADEN);   //Enable ADC
+
+      updateBatterySystemVoltages();
+
+      if (supplyVoltage > SUPPLY_VOLTAGE_ACCEPTABLE_MINIMUM) {
+        if (batteryVoltage > BATTERY_CHARGE_VOLTAGE_THRESHOLD) {
+          batteryState = CHARGED;
+          voltageTarget = BATTERY_CHARGED_SUSTAIN_VOLTAGE;
+        } else {
+          batteryState = CHARGING;
+          voltageTarget = batteryVoltage + (BATTERY_CHARGING_CURRENT_mA*BATTERY_CHARGING_RESISTOR_VALUE / 1000.0f);
+          
+        }
+        dutyCycle = 1.0f - supplyVoltage/voltageTarget;   //Starter duty cycle, will be corrected via feedback; this just jumpstarts that cycle so it doesn't have to start from 0
+      }
+
+      readAndSendThermistorData();
+
+      sleepCycleCount = 0;
+    }
+
+    Serial.print("State: DISCHARGING");
+    break;
+  case CHARGING:
+    
+    if(batteryVoltage > BATTERY_CHARGE_VOLTAGE_THRESHOLD) {
+      batteryState = CHARGED;
+      voltageTarget = BATTERY_CHARGED_SUSTAIN_VOLTAGE;
+    } else if (supplyVoltage < SUPPLY_VOLTAGE_ACCEPTABLE_MINIMUM) {
+      batteryState = DISCHARGING;
+      dutyCycle = 0;
+      voltageTarget = 0;
+    }
+    Serial.print("State: CHARGING");
+    break;
+  case CHARGED:
+    //Assume that the only reason to leave the "charged" state is losing the supply, and thus discharging
+    if (supplyVoltage < SUPPLY_VOLTAGE_ACCEPTABLE_MINIMUM) {
+      batteryState = DISCHARGING;
+      voltageTarget = 0;
+      dutyCycle = 0;
+    }
+    Serial.print("State: CHARGED");
+    break;
+  }
+
+  HM10.write("");
+  
+  if (boostEnabled) readAndSendThermistorData();
+
+  delay(500);
+}
+
+ISR(WDT_vect) {
+  // SMCR &= ~_BV(SE);
+  digitalWrite(LED_BUILTIN, digitalRead(LED_BUILTIN) ^ 1);
+  digitalWrite(LED_BUILTIN, digitalRead(LED_BUILTIN) ^ 1);
+  digitalWrite(LED_BUILTIN, digitalRead(LED_BUILTIN) ^ 1);
+  digitalWrite(LED_BUILTIN, digitalRead(LED_BUILTIN) ^ 1);
+
+  if (SMCR & SM1) {
+    Serial.println("Sleep Mode CONFIGURED");
+  } else {
+    Serial.println("Sleep Mode NOT CONFIGURED");
+  }
+}
+
+void updateBatterySystemVoltages() {
+  //Sample and calculate all voltages known to circuit
+  //Output voltage is output of boost converter, averaged to avoid spikes due to component imperfections
+  double outputVoltageSampleSum = 0;
+  outputVoltageReadingsInitialized = true;
+  for (int j = numOutputVoltageSamples - 1; j > 0; j--) {
+    outputVoltageSamples[j] = outputVoltageSamples[j-1];                          //Shift all voltage readings one index right, deleting oldest value
+    if (outputVoltageSamples[j] == 0) outputVoltageReadingsInitialized = false;   //Zero check, don't update duty cycle if average is dragged down by zeros
+    outputVoltageSampleSum += outputVoltageSamples[j];
+  }
+  outputVoltageSamples[0] = analogRead(OUTPUT_VOLTAGE_PIN);
+  outputVoltageSampleSum += outputVoltageSamples[0];
+  outputVoltage = (outputVoltageSampleSum/numOutputVoltageSamples) * OUTPUT_VOLTAGE_DIVIDER_SCALE / 1023.0f * 5.0f;
+  batteryVoltage = analogRead(BATTERY_VOLTAGE_PIN) * BATTERY_VOLTAGE_DIVIDER_SCALE / 1023.0f * 5.0f;
+  supplyVoltage = analogRead(SUPPLY_VOLTAGE_PIN) / 1023.0f * 5.0f;
+  //End of voltage calculations
+}
+
+void readAndSendThermistorData() {
   //THERMISTOR READING
   uint8_t i;
   float average;
@@ -225,6 +309,4 @@ void loop() {
     // Send the data to the serial monitor
     Serial.write(btData);
   }
-  
-  delay(2000);
 }
