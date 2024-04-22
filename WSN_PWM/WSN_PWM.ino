@@ -8,15 +8,15 @@
 #define CLOCK_FREQUENCY 16000000
 #define PWM_FREQUENCY 50000
 
-#define SLEEP_CYCLE_COUNT_UPDATE_THRESH 2  //WDT throws a flag every 2 seconds; 15 cycles means 30 seconds of sleep mode before updating and state checking
+#define SLEEP_CYCLE_COUNT_UPDATE_THRESH 4  //WDT throws a flag every 2 seconds; 15 cycles means 30 seconds of sleep mode before updating and state checking
 
-#define OUTPUT_VOLTAGE_DIVIDER_SCALE 2.8      //Should be *roughly* (330000 + 680000) / 330000 or whatever other voltage divider you use
+#define OUTPUT_VOLTAGE_DIVIDER_SCALE 2.7      //Should be *roughly* (330000 + 680000) / 330000 or whatever other voltage divider you use
 #define OUTPUT_VOLTAGE_ACCEPTABLE_ERROR 0.05
 #define PWM_KP 0.005
 #define MIN_DUTY_CYCLE 0
 #define MAX_DUTY_CYCLE 1
 
-#define BATTERY_VOLTAGE_DIVIDER_SCALE 2.8
+#define BATTERY_VOLTAGE_DIVIDER_SCALE 2.7
 #define SUPPLY_VOLTAGE_ACCEPTABLE_MINIMUM 3.0
 #define BATTERY_CHARGING_CURRENT_mA 100         //Maximum is 150
 #define BATTERY_CHARGING_RESISTOR_VALUE 10        //in Ohms
@@ -63,6 +63,8 @@ int samples = 0;                  // array to store the samples
 SoftwareSerial HM10(10, 11);
 
 void setup() {
+  noInterrupts();
+
   //Pin configurations
   pinMode(SUPPLY_VOLTAGE_PIN, INPUT);   //Supply ADC, for determining charging mode
   pinMode(BATTERY_VOLTAGE_PIN, INPUT);  //Battery ADC, used to monitor battery charging state
@@ -118,6 +120,9 @@ void setup() {
   //Power-down sleep mode configuration
   SMCR |= _BV(SM1);
 
+  WDTCSR = _BV(WDCE) | _BV(WDE);
+  WDTCSR = _BV(WDIE) | _BV(WDP2) | _BV(WDP1) | _BV(WDP0);
+
   //Initial state configuration
   updateBatterySystemVoltages();
   if (supplyVoltage > SUPPLY_VOLTAGE_ACCEPTABLE_MINIMUM) {
@@ -126,6 +131,7 @@ void setup() {
     dutyCycle = 1.0f - supplyVoltage/voltageTarget;
   } else {
     batteryState = DISCHARGING;
+    interrupts();
   }
 }
 
@@ -168,7 +174,6 @@ void loop() {
 
   switch(batteryState) {
   case DISCHARGING:
-    Serial.println("Procing sleep mode");
 
     //Sleep mode handling
     // ADCSRA &= ~_BV(ADEN);  //Disable ADC
@@ -183,6 +188,8 @@ void loop() {
       // PRR |= _BV(PRADC);     //Power-up the ADC
       // ADCSRA |= _BV(ADEN);   //Enable ADC
 
+      Serial.println("Updating state...");
+
       updateBatterySystemVoltages();
 
       if (supplyVoltage > SUPPLY_VOLTAGE_ACCEPTABLE_MINIMUM) {
@@ -195,6 +202,8 @@ void loop() {
           
         }
         dutyCycle = 1.0f - supplyVoltage/voltageTarget;   //Starter duty cycle, will be corrected via feedback; this just jumpstarts that cycle so it doesn't have to start from 0
+
+        noInterrupts();
       }
 
       readAndSendThermistorData();
@@ -202,7 +211,7 @@ void loop() {
       sleepCycleCount = 0;
     }
 
-    Serial.print("State: DISCHARGING");
+    Serial.println("State: DISCHARGING");
     break;
   case CHARGING:
     
@@ -213,6 +222,7 @@ void loop() {
       batteryState = DISCHARGING;
       dutyCycle = 0;
       voltageTarget = 0;
+      interrupts();
     }
     Serial.print("State: CHARGING");
     break;
@@ -222,6 +232,7 @@ void loop() {
       batteryState = DISCHARGING;
       voltageTarget = 0;
       dutyCycle = 0;
+      interrupts();
     }
     Serial.print("State: CHARGED");
     break;
@@ -241,11 +252,7 @@ ISR(WDT_vect) {
   digitalWrite(LED_BUILTIN, digitalRead(LED_BUILTIN) ^ 1);
   digitalWrite(LED_BUILTIN, digitalRead(LED_BUILTIN) ^ 1);
 
-  if (SMCR & SM1) {
-    Serial.println("Sleep Mode CONFIGURED");
-  } else {
-    Serial.println("Sleep Mode NOT CONFIGURED");
-  }
+  Serial.println("WATCHDOG INTERRUPT THROWN");
 }
 
 void updateBatterySystemVoltages() {
