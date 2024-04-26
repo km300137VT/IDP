@@ -10,15 +10,15 @@
 
 #define SLEEP_CYCLE_COUNT_UPDATE_THRESH 15  //WDT throws a flag every 2 seconds; 15 cycles means 30 seconds of sleep mode before updating and state checking
 
-#define OUTPUT_VOLTAGE_DIVIDER_SCALE 2.7      //Should be *roughly* (330000 + 680000) / 330000 or whatever other voltage divider you use
+#define OUTPUT_VOLTAGE_DIVIDER_SCALE 2.78      //Should be *roughly* (330000 + 680000) / 330000 or whatever other voltage divider you use
 #define OUTPUT_VOLTAGE_ACCEPTABLE_ERROR 0.05
 #define PWM_KP 0.005
 #define MIN_DUTY_CYCLE 0
-#define MAX_DUTY_CYCLE 1
+#define MAX_DUTY_CYCLE 0.9
 
 #define BATTERY_VOLTAGE_DIVIDER_SCALE 2.7
 #define SUPPLY_VOLTAGE_ACCEPTABLE_MINIMUM 3.0
-#define BATTERY_CHARGING_CURRENT_mA 100         //Maximum is 150
+#define BATTERY_CHARGING_CURRENT_mA 75         //Maximum is 150
 #define BATTERY_CHARGING_RESISTOR_VALUE 10        //in Ohms
 #define BATTERY_CHARGE_VOLTAGE_THRESHOLD 10.3
 #define BATTERY_CHARGED_SUSTAIN_VOLTAGE 10.5
@@ -27,7 +27,8 @@
 typedef enum {
   DISCHARGING,
   CHARGING,
-  CHARGED  
+  CHARGED,
+  DEBUG
 } BatteryState;
 BatteryState batteryState;
 
@@ -46,7 +47,7 @@ double outputVoltage;
 double supplyVoltage;
 double batteryVoltage;
 
-#define boostEnabled (batteryState == CHARGING || batteryState == CHARGED)
+#define boostEnabled (batteryState == CHARGING || batteryState == CHARGED || batteryState == DEBUG)
 
 //Thermistor global variables
 #define ntc_pin A0                // Pin, to which the voltage divider is connected
@@ -114,13 +115,14 @@ void setup() {
   HM10.begin(9600);
   // Start the serial communication with the computer at 9600 baud
   Serial.begin(9600);
-  while(!Serial);
+  // while(!Serial);
   Serial.println("Beginning WSN System...");
 
   //Power-down sleep mode configuration
   SMCR |= _BV(SM1);
 
-  WDTCSR = _BV(WDCE) | _BV(WDE);
+  //Watchdog Timer 2 second overflow interrupt configuration
+  WDTCSR = _BV(WDCE) | _BV(WDE);  //Configure write bits first
   WDTCSR = _BV(WDIE) | _BV(WDP2) | _BV(WDP1) | _BV(WDP0);
 
   //Initial state configuration
@@ -133,6 +135,9 @@ void setup() {
     batteryState = DISCHARGING;
     interrupts();
   }
+
+  // batteryState = DEBUG;
+  // noInterrupts();
 }
 
 void loop() {
@@ -234,8 +239,15 @@ void loop() {
       voltageTarget = 0;
       dutyCycle = 0;
       interrupts();
+    } else if (batteryVoltage < BATTERY_CHARGE_VOLTAGE_THRESHOLD) {
+      batteryState = CHARGING;
+      voltageTarget = batteryVoltage + (BATTERY_CHARGING_CURRENT_mA*BATTERY_CHARGING_RESISTOR_VALUE / 1000.0f);
     }
     Serial.print("State: CHARGED");
+    break;
+  case DEBUG:
+    voltageTarget = 8;
+    Serial.print("State: DEBUG");
     break;
   }
 
